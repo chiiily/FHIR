@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>Watch Simulator</title>
+    <style>
+        body {
+            background-color: #444; /* 調亮背景避免整片全黑 */
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        .container { border: 2px solid #666; /* 加邊框方便確認是否顯示 */
+            display: flex;
+            flex-direction: row;
+            gap: 30px;
+        }
+        .side-box {
+            width: 200px;
+            height: 380px;
+            background: #333;
+            border-radius: 20px;
+            padding: 20px;
+            color: white;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            box-shadow: 0 0 10px rgba(0,0,0,0.6);
+        }
+        .side-title {
+            font-size: 20px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .btn-side {
+            width: 100%;
+            padding: 12px;
+            margin-top: 10px;
+            border: none;
+            border-radius: 10px;
+            background-color: #ff9f0a;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        .btn-side-danger {
+            background-color: #ff453a;
+            color: white;
+        }
+
+        .watch-face {
+            width: 300px;
+            height: 380px;
+            background-color: black;
+            border-radius: 40px;
+            border: 4px solid #444;
+            box-shadow: 0 0 20px rgba(0,0,0,0.8);
+            padding: 20px;
+            color: white;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            position: relative;
+        }
+        .header { font-size: 14px; color: #aaa; margin-bottom: 20px; width: 100%; text-align: center;}        
+        .metric-label { font-size: 14px; margin-top: 5px; color: #ccc; }
+        .metric-value { font-size: 36px; font-weight: bold; margin-bottom: 10px; }
+        .status { margin-top: 15px; font-size: 12px; color: #888; text-align: center; height: 40px;}
+
+        .alert-box {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(50,0,0,0.9);
+            border-radius: 36px;
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            padding: 20px;
+            z-index: 10;
+        }
+    .shake {
+    animation: shakeAnim 0.6s ease;
+}
+@keyframes shakeAnim {
+    0% { transform: translateX(0); }
+    25% { transform: translateX(-10px); }
+    50% { transform: translateX(10px); }
+    75% { transform: translateX(-10px); }
+    100% { transform: translateX(0); }
+}
+</style>
+</head>
+<body>
+    <div class="container">
+        <div class="side-box">
+            <div class="side-title">模擬預防情境</div>
+            <!-- 正確的 onclick：只呼叫已定義的函式 -->
+            <button class="btn-side" onclick="simulatePrevention();">⚠️ 高壓風險</button>
+        </div>
+
+        <div class="watch-face" onclick="watchTapped();">
+            <div class="header">10:09</div>
+
+            <div class="metric-label">❤️ 心率 HR</div>
+            <div class="metric-value" id="hrDisplay">72</div>
+
+            <div class="metric-label">📉 心率變異 HRV</div>
+            <div class="metric-value" id="hrvDisplay">55</div>
+
+            <div class="metric-label">🩸 血氧 SpO₂</div>
+            <div class="metric-value" id="spoDisplay">98%</div>
+
+            <div class="status" id="statusLog">系統待命中...</div>
+
+            <div class="alert-box" id="alertBox">
+                <h2 style="color: #ff453a;">警報</h2>
+                <p id="alertMsg">正在聯絡急診...</p>
+                <button class="btn-side" id="closeBtn" onclick="closeAlert();">關閉</button>
+            </div>
+        </div>
+
+        <div class="side-box">
+            <div class="side-title">模擬急救情境</div>
+            <button class="btn-side btn-side-danger" onclick="simulateEmergency();">🚑 跌倒昏迷</button>
+        </div>
+    </div>
+
+    <script>
+        /* === 手錶晃動效果（取代震動）=== */
+        function vibrateWatch() {
+            const watch = document.querySelector('.watch-face');
+            watch.classList.add('shake');
+            setTimeout(()=> watch.classList.remove('shake'), 600);
+        }
+
+        /* === 急救語音循環播報 === */
+        let emergencySpeech;
+        let speaking = false;
+
+        function startEmergencyBroadcast() {
+            if (!('speechSynthesis' in window)) return; // 若不支援則直接返回
+            if (!speaking) {
+                speaking = true;
+                emergencySpeech = new SpeechSynthesisUtterance('請按下手錶畫面幫助這位患者');
+                emergencySpeech.lang = 'zh-TW';
+                emergencySpeech.rate = 1.0;
+                emergencySpeech.onend = () => {
+                    if (speaking) {
+                        // 重新建立新的 utterance，避免某些瀏覽器無限循環問題
+                        const next = new SpeechSynthesisUtterance('請按下手錶畫面幫助這位患者');
+                        next.lang = 'zh-TW';
+                        next.rate = 1.0;
+                        next.onend = () => { if (speaking) speechSynthesis.speak(next); };
+                        speechSynthesis.speak(next);
+                    }
+                };
+                speechSynthesis.speak(emergencySpeech);
+            }
+        }
+
+        function stopEmergencyBroadcast() {
+            speaking = false;
+            if ('speechSynthesis' in window) speechSynthesis.cancel();
+        }
+
+        /* === 點擊手錶畫面顯示指示訊息 === */
+        function watchTapped() {
+            // 當正在播報時，點擊會停止播報並顯示指示與關閉鍵
+            if (speaking) {
+                stopEmergencyBroadcast();
+                showAlert('📢 播報指示訊息中...<br>👨‍⚕️ 醫生語音通話已連線', true);
+                log('播報指示訊息 / 醫生通話連線');
+            }
+        }
+
+        function log(msg) {
+            document.getElementById('statusLog').innerText = msg;
+        }
+
+        function showAlert(msg, showClose = false) {
+            document.getElementById('alertMsg').innerHTML = msg;
+            const alertBox = document.getElementById('alertBox');
+            alertBox.style.display = 'flex';
+            const closeBtn = document.getElementById('closeBtn');
+            closeBtn.style.display = showClose ? 'block' : 'none';
+        }
+
+        function closeAlert() {
+            document.getElementById('alertBox').style.display = 'none';
+            // 回到初始畫面
+            document.getElementById('hrDisplay').innerText = "72";
+            document.getElementById('hrvDisplay').innerText = "55";
+            document.getElementById('spoDisplay').innerText = "98%";
+            document.getElementById('statusLog').innerText = "系統待命中...";
+            stopEmergencyBroadcast();
+        }
+
+        const FHIR_SERVER_URL = "https://hapi.fhir.org/baseR4";
+
+        function simulatePrevention() {
+            document.getElementById('hrDisplay').innerText = "110";
+            document.getElementById('hrvDisplay').innerText = "20";
+            document.getElementById('spoDisplay').innerText = "93%";
+            log("正在上傳 AI 風險評估...");
+
+            // 顯示警報並立刻顯示關閉鍵
+            showAlert("⚠️ 壓力過高<br>建議立即休息", true);
+            vibrateWatch();
+            log("Server 回應: 200 OK (Flag Created)");
+        }
+
+        function simulateEmergency() {
+            document.getElementById('hrDisplay').innerText = "--";
+            document.getElementById('hrvDisplay').innerText = "--";
+            document.getElementById('spoDisplay').innerText = "--";
+            log("偵測到跌倒！上傳 GPS 中...");
+
+            // 開始語音循環播報，不顯示關閉鍵
+            startEmergencyBroadcast();
+            showAlert("🚑 救護車已派遣<br>醫生連線中...", false);
+            log("收到 ServiceRequest: voice-call=true");
+        }
+    </script>
+</body>
+</html>
