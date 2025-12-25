@@ -2,19 +2,20 @@ import streamlit as st
 import requests
 import uuid
 import time
+import re  # [新增] 用來解析伺服器回傳的 ID 字串
 from datetime import datetime, timezone
 
-# --- 匯入模組 (請確保您的資料夾中有這兩個檔案) ---
+# --- 匯入模組 ---
 try:
     from fhir_gateway import create_raw_data_bundle
     from ai_engine import analyze_and_create_report
 except ImportError:
-    st.error("❌ 找不到必要的模組 (fhir_gateway.py 或 ai_engine.py)。請確認檔案是否在同一目錄下。")
+    st.error("❌ 找不到必要的模組 (fhir_gateway.py 或 ai_engine.py)。")
     st.stop()
 
 st.set_page_config(layout="wide", page_title="h1 雙軌醫療系統 (FHIR 標準版)")
 
-# [修正 1] 改用 HAPI FHIR R4 公用伺服器 (比 fire.ly 穩定且權限較寬鬆)
+# 使用 HAPI FHIR R4 公用伺服器
 FHIR_SERVER_URL = "https://hapi.fhir.org/baseR4"
 
 # --- 初始化 Session State ---
@@ -23,6 +24,7 @@ if 'watch_message' not in st.session_state: st.session_state['watch_message'] = 
 if 'has_data' not in st.session_state: st.session_state['has_data'] = False
 if 'vitals' not in st.session_state: st.session_state['vitals'] = {}
 if 'pid' not in st.session_state: st.session_state['pid'] = None
+if 'server_pid' not in st.session_state: st.session_state['server_pid'] = None # [新增] 用來存伺服器回傳的 ID
 if 'ai_status' not in st.session_state: st.session_state['ai_status'] = "unknown"
 if 'risk_id' not in st.session_state: st.session_state['risk_id'] = None
 
@@ -30,32 +32,46 @@ if 'risk_id' not in st.session_state: st.session_state['risk_id'] = None
 
 def send_bundle(bundle):
     headers = {"Content-Type": "application/fhir+json"}
-    
-    # [修正 2] 強制將 Bundle 類型設為 transaction，這是根目錄寫入的標準格式
     if bundle.get("resourceType") == "Bundle":
         bundle["type"] = "transaction"
     
     try:
-        # 設定 timeout 避免卡死
         response = requests.post(FHIR_SERVER_URL, json=bundle, headers=headers, timeout=20)
-        
-        # [修正 3] 詳細的錯誤處理
         if response.status_code not in [200, 201]:
             st.error(f"上傳失敗 (HTTP {response.status_code})")
-            with st.expander("🔍 查看伺服器錯誤詳情 (Server Response)"):
-                st.text(response.text)  # 印出伺服器具體報錯原因
+            with st.expander("🔍 查看伺服器錯誤詳情"):
+                st.text(response.text)
             return None
-            
         return response
     except requests.exceptions.RequestException as e:
         st.error(f"連線錯誤: {e}")
         return None
 
+def extract_id_from_response(response_json, resource_type="Patient"):
+    """
+    [新增] 從 Server 回傳的 Bundle Response 中提取指定資源的 ID
+    格式通常為: ResourceType/ID/_history/Version
+    """
+    try:
+        if 'entry' in response_json:
+            for entry in response_json['entry']:
+                # 檢查 response 欄位中的 location
+                if 'response' in entry and 'location' in entry['response']:
+                    location = entry['response']['location']
+                    # 判斷是否為我們要找的資源類型
+                    if location.startswith(resource_type):
+                        # 使用正則表達式提取 ID (在 ResourceType/ 和 /_history 之間)
+                        parts = location.split('/')
+                        if len(parts) >= 2:
+                            return parts[1] # 傳回 ID 部分
+    except Exception as e:
+        return None
+    return None
+
 def send_service_request(patient_id, risk_id):
     """發送醫療處置請求 (Start CPR)"""
     req_id = str(uuid.uuid4())
     safe_risk_id = risk_id if risk_id else "unknown"
-    
     sr = {
         "resourceType": "ServiceRequest",
         "id": req_id,
@@ -66,8 +82,6 @@ def send_service_request(patient_id, risk_id):
         "subject": {"reference": f"Patient/{patient_id}"},
         "reasonReference": [{"reference": f"RiskAssessment/{safe_risk_id}"}],
     }
-    
-    # 包裝成 Transaction Bundle 發送
     bundle = {
         "resourceType": "Bundle",
         "type": "transaction",
@@ -80,10 +94,9 @@ def send_service_request(patient_id, risk_id):
     return req_id, sr, res
 
 def send_communication_request(patient_id, message_text, priority="routine"):
-    """發送溝通請求 (Doctor Instruction)"""
+    """發送溝通請求"""
     req_id = str(uuid.uuid4())
     timestamp = datetime.now(timezone.utc).isoformat()
-    
     comm_req = {
         "resourceType": "CommunicationRequest",
         "id": req_id,
@@ -94,8 +107,6 @@ def send_communication_request(patient_id, message_text, priority="routine"):
         "authoredOn": timestamp,
         "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/communication-category", "code": "instruction"}]}]
     }
-    
-    # 包裝成 Transaction Bundle 發送
     bundle = {
         "resourceType": "Bundle",
         "type": "transaction",
@@ -104,7 +115,6 @@ def send_communication_request(patient_id, message_text, priority="routine"):
             "request": {"method": "POST", "url": "CommunicationRequest"}
         }]
     }
-    
     res = send_bundle(bundle)
     return req_id, comm_req, res
 
@@ -125,7 +135,6 @@ with tab1:
         state = st.session_state['watch_screen']
         msg = st.session_state['watch_message']
 
-        # [UI 修正] 優先級：CPR > Msg > Rest
         if state == "cpr":
             st.error("🆘 EMERGENCY - ServiceRequest Received")
             st.markdown("""
@@ -162,37 +171,53 @@ with tab1:
             st.success("✅ 監測中...")
             if st.session_state['has_data']:
                 v = st.session_state['vitals']
+                # [新增] 這裡顯示伺服器回傳的 ID
+                server_id_display = st.session_state.get('server_pid', 'Unknown')
+                st.metric("FHIR ID", server_id_display)
                 st.metric("Heart Rate", f"{v.get('hr')} bpm")
 
     with col_sensor:
         st.subheader("⚙️ 生理感測")
         c1, c2 = st.columns(2)
         user_name = c1.text_input("姓名", "Wang Xiao-Mei")
-        user_id = c2.text_input("ID", "A223456789")
+        user_id = c2.text_input("身分證號", "A223456789")
         
         hr = st.slider("❤️ 心率", 40, 200, 75)
         spo2 = st.slider("💧 血氧", 70, 100, 98)
         hrv = st.slider("📈 HRV", 10, 100, 60)
         stress = st.slider("🤯 壓力", 0, 100, 20)
         
-        # [變數一致性] 定義變數以確保上傳與顯示一致
-        sys_bp = 110
-        dia_bp = 70
-        resp_rate = 16
-        sleep_hours = 7
+        sys_bp, dia_bp, resp_rate, sleep_hours = 110, 70, 16, 7
 
         if st.button("📡 上傳數據"):
-            with st.spinner("上傳中..."):
-                # 1. 產生 FHIR 數據包
+            with st.spinner("上傳並等待伺服器確認..."):
                 raw_bundle, pid, oid = create_raw_data_bundle(
                     user_id, user_name, hr, spo2, sys_bp, dia_bp, resp_rate, hrv, stress, sleep_hours, 25.033, 121.565
                 )
                 
-                # 2. 上傳到伺服器 (呼叫修正後的函式)
+                # 自動修正請求方法為 PUT
+                if 'entry' in raw_bundle:
+                    for entry in raw_bundle['entry']:
+                        resource = entry.get('resource', {})
+                        res_type = resource.get('resourceType')
+                        res_id = resource.get('id')
+                        if res_type == 'Patient':
+                            entry['request'] = {"method": "PUT", "url": f"Patient/{res_id}"}
+                        elif 'request' not in entry:
+                            entry['request'] = {"method": "POST", "url": res_type}
+
                 res = send_bundle(raw_bundle)
                 
                 if res and res.status_code in [200, 201]:
-                    st.session_state['pid'] = pid
+                    # [新增重點] 解析伺服器回傳的 ID
+                    server_response = res.json()
+                    confirmed_patient_id = extract_id_from_response(server_response, "Patient")
+                    
+                    # 如果解析失敗（防呆），就用原本我們生成的 ID
+                    final_pid = confirmed_patient_id if confirmed_patient_id else pid
+
+                    st.session_state['pid'] = final_pid
+                    st.session_state['server_pid'] = final_pid # 存入 session
                     st.session_state['has_data'] = True
                     st.session_state['vitals'] = {
                         "hr": hr, "spo2": spo2, "hrv": hrv, "stress": stress, 
@@ -200,9 +225,12 @@ with tab1:
                         "resp": resp_rate, "sleep": sleep_hours
                     }
                     st.session_state['watch_screen'] = "normal"
-                    st.toast("上傳成功", icon="✅")
+                    
+                    # 顯示綠色大框框告知使用者
+                    st.success(f"上傳成功！伺服器已確認病患 ID: {final_pid}")
+                    with st.expander("查看 Server 回傳的 JSON (Response)"):
+                        st.json(server_response)
                 else:
-                    # 錯誤訊息已在 send_bundle 中顯示
                     pass
 
 # ==========================================
@@ -213,9 +241,10 @@ with tab2:
     
     if st.session_state['has_data']:
         v = st.session_state['vitals']
-        st.info(f"當前病患: {v['name']} | HR: {v['hr']} | SpO2: {v['spo2']} | BP: {v['sys_bp']}/{v['dia_bp']}")
+        # [修改] 顯示伺服器確認的 ID
+        pid_display = st.session_state.get('server_pid', 'Unknown')
+        st.info(f"當前病患: {v['name']} (FHIR ID: {pid_display}) | HR: {v['hr']} | SpO2: {v['spo2']}")
 
-        # AI 分析區塊
         if st.button("🤖 AI 風險計算"):
             with st.spinner("AI 分析中..."):
                 bundle, status, desc, risk_id = analyze_and_create_report(v, st.session_state['pid'])
@@ -233,17 +262,14 @@ with tab2:
                     else:
                         st.success("數據正常")
                 else:
-                    st.error("AI 報告上傳失敗，請檢查 Server 回應")
+                    st.error("AI 報告上傳失敗")
 
         st.markdown("---")
-
         c_comm, c_ems = st.columns(2)
 
-        # --- 功能 A: 醫生溝通 ---
         with c_comm:
             st.subheader("💬 醫生遠端指令")
             doc_msg = st.text_input("輸入醫囑:", "請多喝水並保持冷靜。")
-            
             if st.button("📤 發送訊息"):
                 req_id, comm_json, res = send_communication_request(
                     st.session_state['pid'], doc_msg, priority="routine"
@@ -253,18 +279,16 @@ with tab2:
                     st.toast("已發送", icon="📨")
                     with st.expander("JSON"): st.json(comm_json)
 
-        # --- 功能 B: 急救處置 ---
         with c_ems:
             st.subheader("🚀 緊急醫療處置")
             is_emergency = st.session_state.get('ai_status') == 'emergency'
-            
-            if st.button("🔴 啟動 CPR 急救", disabled=not is_emergency, help="僅緊急風險可用"):
+            if st.button("🔴 啟動 CPR 急救", disabled=not is_emergency):
                 req_id, sr_json, res = send_service_request(
                     st.session_state['pid'], st.session_state.get('risk_id')
                 )
                 if res and res.status_code in [200, 201]:
                     st.session_state['watch_screen'] = "cpr"
-                    st.session_state['watch_message'] = None # 清除文字訊息，避免干擾
+                    st.session_state['watch_message'] = None
                     st.toast("已發送 CPR 指令", icon="🚑")
                     with st.expander("JSON"): st.json(sr_json)
 
