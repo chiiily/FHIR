@@ -2,65 +2,81 @@ import uuid
 import json
 from datetime import datetime, timezone
 
-# 這是 AI 核心函式
-# 輸入：心率數值, 病人ID, 原始數據ID (因為 AI 需要知道是針對哪筆資料做分析)
-# 輸出：(AI分析包 Bundle, 風險等級字串)
-def analyze_and_create_report(heart_rate, patient_id, obs_id):
+def analyze_and_create_report(vitals, patient_id):
+    """
+    輸入 vitals 字典包含: hr, spo2, hrv, stress, sleep, sys_bp ...
+    輸出: FHIR Bundle, 狀態類別(status), 描述(description), 風險評估ID(risk_id)
+    """
     
-    # 1. 生成這次分析報告的 ID
+    # 1. 初始化
     risk_id = str(uuid.uuid4())
     timestamp = datetime.now(timezone.utc).isoformat()
-
-    # ==========================================
-    #  🧠 AI 判斷邏輯 (這裡是你可以自由發揮的地方)
-    #  目前使用規則基礎 (Rule-based)，未來可換成機器學習模型
-    # ==========================================
+    
+    # 預設狀態：正常
+    status_type = "normal" 
     risk_level = "low"
-    probability = 0.1
-    description = "Vital signs within normal limits"
-    action_needed = False
+    description = "All vital signs are within normal limits."
+    
+    # === 2. AI 判斷邏輯 (規則引擎) ===
 
-    if heart_rate > 150:
+    # [規則 A: 急救回應流程 (Emergency Response)]
+    # 條件：心率極端異常、血氧過低、或血壓危象
+    # 邏輯：只要中一個，就是最高級別危險
+    if (vitals['hr'] > 170 or vitals['hr'] < 40) or \
+       (vitals['spo2'] < 85) or \
+       (vitals['sys_bp'] > 180):
+           
+        status_type = "emergency"
+        risk_level = "critical"
+        
+        reasons = []
+        if vitals['hr'] > 170: reasons.append("Severe Tachycardia")
+        if vitals['hr'] < 40: reasons.append("Severe Bradycardia")
+        if vitals['spo2'] < 85: reasons.append("Hypoxia")
+        if vitals['sys_bp'] > 180: reasons.append("Hypertensive Crisis")
+        
+        description = f"CRITICAL: {', '.join(reasons)}. Immediate medical intervention required."
+
+    # [規則 B: 預防監測流程 (Preventive Flow)]
+    # 條件：非急救狀態，但 壓力過高、睡眠不足 或 HRV 過低
+    elif (vitals['stress'] > 80) or \
+         (vitals['sleep'] < 5) or \
+         (vitals['hrv'] < 30):
+             
+        status_type = "preventive"
         risk_level = "high"
-        probability = 0.85
-        description = "CRITICAL: Tachycardia detected. Risk of Cardiac Arrest."
-        action_needed = True # 需要急救！
         
-    elif heart_rate < 50:
-        risk_level = "moderate"
-        probability = 0.45
-        description = "WARNING: Bradycardia detected. Monitor required."
+        reasons = []
+        if vitals['stress'] > 80: reasons.append("High Stress Level")
+        if vitals['sleep'] < 5: reasons.append("Sleep Deprivation")
+        if vitals['hrv'] < 30: reasons.append("Low HRV (Fatigue)")
         
-    else:
-        # 正常數值
-        risk_level = "low"
-        probability = 0.12
-        description = "Normal Sinus Rhythm."
-
-    # ==========================================
-    #  📝 產出 FHIR Resource: RiskAssessment (風險評估報告)
-    # ==========================================
+        description = f"WARNING: {', '.join(reasons)}. Rest recommended to prevent burnout."
+    
+    # === 3. 產出 RiskAssessment (風險評估報告) ===
+    # 這份報告是 AI 思考後的結晶，會存回 Server
     risk_assessment = {
         "resourceType": "RiskAssessment",
         "id": risk_id,
         "status": "final",
-        "subject": {"reference": f"Patient/{patient_id}"}, # 指向那位病人
-        "basis": [{"reference": f"Observation/{obs_id}"}], # 憑據：我是根據剛剛那筆心率判斷的
+        "subject": {"reference": f"Patient/{patient_id}"},
         "occurrenceDateTime": timestamp,
-        "prediction": [{
-            "outcome": {"text": description}, # AI 的文字診斷
-            "probabilityDecimal": probability, # AI 算出的機率 (0.0~1.0)
-            "qualitativeRisk": {
-                "coding": [{
-                    "system": "http://terminology.hl7.org/CodeSystem/risk-probability",
-                    "code": risk_level, # low / moderate / high
-                    "display": risk_level.capitalize() + " likelihood"
-                }]
+        "prediction": [
+            {
+                "outcome": {"text": description}, # AI 的文字診斷
+                # 根據狀態給予機率值 (急救=0.95, 預防=0.6, 正常=0.1)
+                "probabilityDecimal": 0.95 if status_type == "emergency" else (0.6 if status_type == "preventive" else 0.1),
+                "qualitativeRisk": {
+                    "coding": [{
+                        "system": "http://terminology.hl7.org/CodeSystem/risk-probability",
+                        "code": risk_level # critical / high / low
+                    }]
+                }
             }
-        }]
+        ]
     }
 
-    # 開始準備要打包的清單
+    # === 4. 打包回傳 ===
     entries = [
         {
             "fullUrl": f"urn:uuid:{risk_id}", 
@@ -68,66 +84,20 @@ def analyze_and_create_report(heart_rate, patient_id, obs_id):
             "request": {"method": "POST", "url": "RiskAssessment"}
         }
     ]
-
-    # ==========================================
-    #  🚑 產出 FHIR Resource: ServiceRequest (如果需要急救)
-    #  這是 "閉鎖迴路" 的關鍵：AI 自動幫你掛號或叫救護車
-    # ==========================================
-    if action_needed:
-        req_id = str(uuid.uuid4())
-        
-        service_request = {
-            "resourceType": "ServiceRequest",
-            "id": req_id,
-            "status": "active",
-            "intent": "order", # 這是一個命令
-            "priority": "stat", # STAT = 立刻執行！
-            "code": {
-                "coding": [{
-                    "system": "http://snomed.info/sct",
-                    "code": "40617009", 
-                    "display": "Emergency medical intervention" # 緊急醫療介入
-                }]
-            },
-            "subject": {"reference": f"Patient/{patient_id}"},
-            "reasonReference": [{"reference": f"urn:uuid:{risk_id}"}] # 理由：因為上面的風險評估
-        }
-        
-        # 把急救請求也加進包裹裡
-        entries.append({
-            "fullUrl": f"urn:uuid:{req_id}", 
-            "resource": service_request, 
-            "request": {"method": "POST", "url": "ServiceRequest"}
-        })
-
-    # ==========================================
-    #  📦 最終打包
-    # ==========================================
+    
     ai_bundle = {
         "resourceType": "Bundle",
         "type": "transaction",
         "entry": entries
     }
     
-    # 回傳 Bundle 給 app.py 去上傳，同時回傳 risk_level 給 app.py 決定要不要讓手錶震動
-    return ai_bundle, risk_level
+    # 回傳這些資料讓 App 決定畫面要變紅色(Emergency) 還是 黃色(Preventive)
+    return ai_bundle, status_type, description, risk_id
 
-
-# 獨立測試區
+# 測試區
 if __name__ == "__main__":
-    print("🤖 正在測試 AI Engine...")
-    
-    # 模擬狀況：心率飆到 180
-    test_hr = 180
-    test_pid = str(uuid.uuid4())
-    test_oid = str(uuid.uuid4())
-    
-    bundle, risk = analyze_and_create_report(test_hr, test_pid, test_oid)
-    
-    print(f"心率: {test_hr}")
-    print(f"AI 判定風險等級: {risk}")
-    
-    if risk == "high":
-        print("🚨 AI 已自動生成急救指令 (ServiceRequest)！")
-        
-    print(json.dumps(bundle, indent=2))
+    # 模擬一個危險數據
+    test_vitals = {"hr": 180, "spo2": 95, "sys_bp": 120, "stress": 50, "sleep": 7, "hrv": 50}
+    b, s, d, rid = analyze_and_create_report(test_vitals, "test-pid")
+    print(f"Status: {s}") # 應該要是 emergency
+    print(json.dumps(b, indent=2))
