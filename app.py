@@ -125,7 +125,7 @@ with tab_watch:
             <div style="background-color:#d32f2f; color:white; padding:15px; border-radius:10px; text-align:center; animation: blink 1s infinite;">
                 <h2>⚠️ {ai_text}</h2>
                 <hr>
-                <h1>📞 聯絡家人和救助單位...</h1>
+                <h2>📞 聯絡家人和救助單位...</h2>
                 <p>已自動傳送定位與數據給急診醫生</p>
             </div>
             <style>@keyframes blink {{0% {{opacity: 1;}} 50% {{opacity: 0.4;}} 100% {{opacity: 1;}}}}</style>
@@ -263,5 +263,6 @@ with tab_phr:
                         st.warning("查無此 ID 的相關病歷資料 (可能是新註冊用戶尚無數據)。")
                 except Exception as e:
                     st.error(f"連線錯誤: {e}")
+
 
 
